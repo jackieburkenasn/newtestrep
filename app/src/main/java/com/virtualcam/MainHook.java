@@ -1,7 +1,9 @@
 package com.virtualcam;
 
+import android.content.Context;
 import android.hardware.Camera;
-import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
 import android.widget.Toast;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
@@ -17,6 +19,7 @@ public class MainHook implements IXposedHookLoadPackage {
     private static final String TAG = "VirtualCamera";
     private static final String VIDEO_PATH = "/sdcard/DCIM/Camera1/virtual.mp4";
     private VideoDecoder videoDecoder;
+    private Context appContext;
     
     @Override
     public void handleLoadPackage(LoadPackageParam lpparam) throws Throwable {
@@ -28,11 +31,59 @@ public class MainHook implements IXposedHookLoadPackage {
         
         XposedBridge.log(TAG + ": Loading into " + lpparam.packageName);
         
+        // Получаем Context приложения
+        hookApplicationContext(lpparam);
+        
         // Хук старого Camera API
         hookOldCameraAPI(lpparam);
         
         // Хук Camera2 API
         hookCamera2API(lpparam);
+    }
+    
+    private void hookApplicationContext(LoadPackageParam lpparam) {
+        try {
+            XposedHelpers.findAndHookMethod(
+                "android.app.Application",
+                lpparam.classLoader,
+                "attach",
+                Context.class,
+                new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        appContext = (Context) param.args[0];
+                        XposedBridge.log(TAG + ": Context obtained for " + lpparam.packageName);
+                        showToast("Virtual Camera загружен");
+                        
+                        // Проверяем наличие видео
+                        File videoFile = new File(VIDEO_PATH);
+                        if (videoFile.exists()) {
+                            XposedBridge.log(TAG + ": Video file found: " + VIDEO_PATH);
+                            showToast("Видео найдено: virtual.mp4");
+                        } else {
+                            XposedBridge.log(TAG + ": Video file NOT found: " + VIDEO_PATH);
+                            showToast("ОШИБКА: virtual.mp4 не найден!");
+                        }
+                    }
+                }
+            );
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + ": Error hooking Application context: " + t.getMessage());
+        }
+    }
+    
+    private void showToast(final String message) {
+        if (appContext == null) {
+            XposedBridge.log(TAG + ": Cannot show toast - no context");
+            return;
+        }
+        
+        new Handler(Looper.getMainLooper()).post(new Runnable() {
+            @Override
+            public void run() {
+                Toast.makeText(appContext, message, Toast.LENGTH_SHORT).show();
+            }
+        });
     }
     
     private void hookOldCameraAPI(LoadPackageParam lpparam) {
@@ -46,14 +97,25 @@ public class MainHook implements IXposedHookLoadPackage {
                 new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                        XposedBridge.log(TAG + ": Camera.open() called in " + lpparam.packageName);
-                        
-                        // Проверяем наличие видеофайла
-                        File videoFile = new File(VIDEO_PATH);
-                        if (videoFile.exists()) {
-                            XposedBridge.log(TAG + ": Virtual video file found");
-                        } else {
-                            XposedBridge.log(TAG + ": Virtual video file NOT found at " + VIDEO_PATH);
+                        XposedBridge.log(TAG + ": Camera.open() called");
+                        showToast("Камера открыта (старый API)");
+                    }
+                }
+            );
+            
+            // Хук для получения параметров камеры
+            XposedHelpers.findAndHookMethod(
+                "android.hardware.Camera",
+                lpparam.classLoader,
+                "getParameters",
+                new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        Camera.Parameters params = (Camera.Parameters) param.getResult();
+                        if (params != null) {
+                            Camera.Size previewSize = params.getPreviewSize();
+                            XposedBridge.log(TAG + ": Preview size: " + previewSize.width + "x" + previewSize.height);
+                            showToast("Разрешение: " + previewSize.width + "x" + previewSize.height);
                         }
                     }
                 }
@@ -75,6 +137,7 @@ public class MainHook implements IXposedHookLoadPackage {
                         
                         // Проверяем, отключен ли модуль
                         if (Utils.isModuleDisabled()) {
+                            XposedBridge.log(TAG + ": Module disabled by user");
                             return;
                         }
                         
@@ -86,6 +149,7 @@ public class MainHook implements IXposedHookLoadPackage {
                                     byte[] virtualData = getVirtualFrameData(data.length);
                                     
                                     if (virtualData != null && virtualData.length == data.length) {
+                                        XposedBridge.log(TAG + ": Replacing frame with virtual data");
                                         originalCallback.onPreviewFrame(virtualData, camera);
                                     } else {
                                         originalCallback.onPreviewFrame(data, camera);
@@ -96,43 +160,6 @@ public class MainHook implements IXposedHookLoadPackage {
                                 }
                             }
                         };
-                    }
-                }
-            );
-            
-            // Хук для обработки фото
-            XposedHelpers.findAndHookMethod(
-                "android.hardware.Camera",
-                lpparam.classLoader,
-                "takePicture",
-                Camera.ShutterCallback.class,
-                Camera.PictureCallback.class,
-                Camera.PictureCallback.class,
-                Camera.PictureCallback.class,
-                new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        XposedBridge.log(TAG + ": takePicture() called");
-                        
-                        if (Utils.isModuleDisabled()) return;
-                        
-                        // Замена callback для JPEG
-                        Camera.PictureCallback originalJpegCallback = 
-                            (Camera.PictureCallback) param.args[3];
-                        
-                        if (originalJpegCallback != null) {
-                            param.args[3] = new Camera.PictureCallback() {
-                                @Override
-                                public void onPictureTaken(byte[] data, Camera camera) {
-                                    byte[] virtualPhoto = Utils.getVirtualPhoto();
-                                    if (virtualPhoto != null) {
-                                        originalJpegCallback.onPictureTaken(virtualPhoto, camera);
-                                    } else {
-                                        originalJpegCallback.onPictureTaken(data, camera);
-                                    }
-                                }
-                            };
-                        }
                     }
                 }
             );
@@ -155,8 +182,8 @@ public class MainHook implements IXposedHookLoadPackage {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                         String cameraId = (String) param.args[0];
-                        XposedBridge.log(TAG + ": Camera2 opening, ID=" + cameraId + 
-                                       " in " + lpparam.packageName);
+                        XposedBridge.log(TAG + ": Camera2 opening, ID=" + cameraId);
+                        showToast("Camera2 открыта, ID=" + cameraId);
                     }
                 }
             );
@@ -170,6 +197,7 @@ public class MainHook implements IXposedHookLoadPackage {
             if (videoDecoder == null) {
                 File videoFile = new File(VIDEO_PATH);
                 if (!videoFile.exists()) {
+                    XposedBridge.log(TAG + ": Video file not found: " + VIDEO_PATH);
                     return null;
                 }
                 videoDecoder = new VideoDecoder(VIDEO_PATH);
