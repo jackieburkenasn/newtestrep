@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string-array name="xposed_scope">
+        <!-- Добавьте package names приложений для внедрения -->
+        <!-- Пример: -->
+        <!-- <item>com.android.camera2</item> -->
+        <!-- <item>com.google.android.GoogleCamera</item> -->
+        <!-- Или оставьте пустым для глобального scope -->
+    </string-array>
+</resources>
